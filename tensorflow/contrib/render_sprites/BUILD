@@ -72,16 +72,16 @@ tf_gen_op_wrapper_py(
     deps = [":render_sprites_ops_op_lib"],
 )
 
-cuda_py_test(
-    name = "render_sprites_ops_test",
-    size = "small",
-    srcs = ["python/ops/render_sprites_ops_test.py"],
-    additional_deps = [
-        ":render_sprites_py",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:constant_op",
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:errors",
-        "//tensorflow/python:array_ops",
-    ],
-)
+# cuda_py_test(
+#     name = "render_sprites_ops_test",
+#     size = "small",
+#     srcs = ["python/ops/render_sprites_ops_test.py"],
+#     additional_deps = [
+#         ":render_sprites_py",
+#         "//tensorflow/python:client_testlib",
+#         "//tensorflow/python:constant_op",
+#         "//tensorflow/python:dtypes",
+#         "//tensorflow/python:errors",
+#         "//tensorflow/python:array_ops",
+#     ],
+# )

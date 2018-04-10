@@ -27,42 +27,66 @@ class OpKernelContext;
 namespace tensorflow {
 namespace functor {
 
-// Helper functor for the Resampler Op in 2D
+
 template <typename Device, typename T>
-struct Resampler2DFunctor{
+struct RenderSprites2DFunctor<Device, T>{
   void operator ()(::tensorflow::OpKernelContext* ctx,
-                   const Device& d,
-                   const T* __restrict__ data,
-                   const T* __restrict__ warp,
+                   const CPUDevice& d,
+
+                   const T* __restrict__ sprites,
+                   const int32* __restrict__ n_sprites,
+                   const T* __restrict__ scales,
+                   const T* __restrict__ offsets,
+                   const T* __restrict__ backgrounds,
+
                    T* __restrict__ output,
+
                    const int batch_size,
-                   const int data_height,
-                   const int data_width,
-                   const int data_channels,
-                   const int num_sampling_points);
+
+                   const int max_sprites,
+                   const int sprite_height,
+                   const int sprite_width,
+
+                   const int img_height,
+                   const int img_width,
+
+                   const int n_channels);
 };
 
-
-// Helper functor for the Resampler Gradient Op in 2D
 template <typename Device, typename T>
-struct ResamplerGrad2DFunctor{
+struct RenderSpritesGrad2DFunctor<Device, T>{
   void operator ()(::tensorflow::OpKernelContext* ctx,
-                   const Device& d,
-                   const T* __restrict__ data,
-                   const T* __restrict__ warp,
-                   const T* __restrict__ grad_output,
-                   T* __restrict__ grad_data,
-                   T* __restrict__ grad_warp,
-                   const int batch_size,
-                   const int data_height,
-                   const int data_width,
-                   const int data_channels,
-                   const int num_sampling_points);
-};
+                   const CPUDevice& d,
 
+                   const T* __restrict__ sprites,
+                   const int32* __restrict__ n_sprites,
+                   const T* __restrict__ scales,
+                   const T* __restrict__ offsets,
+                   const T* __restrict__ backgrounds,
+                   const T* __restrict__ grad_output,
+
+                   T* __restrict__ scratch,
+
+                   T* __restrict__ grad_sprites,
+                   T* __restrict__ grad_n_sprites,
+                   T* __restrict__ grad_scales,
+                   T* __restrict__ grad_offsets,
+                   T* __restrict__ grad_backgrounds,
+
+                   const int batch_size,
+
+                   const int max_sprites,
+                   const int sprite_height,
+                   const int sprite_width,
+
+                   const int img_height,
+                   const int img_width,
+
+                   const int n_channels);
+};
 
 }  // namespace functor
-}  // namespace tensorflow
 
+}  // namespace tensorflow
 
 #endif  // TENSORFLOW_CONTRIB_RESAMPLER_KERNELS_RESAMPLER_OPS_H_

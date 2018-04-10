@@ -31,85 +31,142 @@ using GPUDevice = Eigen::GpuDevice;
 
 namespace {
 
-#define GET_DATA_POINT(x, y)                   \
-  data[batch_id * data_batch_stride +          \
-       data_channels * (y * data_width + x) +  \
-       chan]
+#define GET_SPRITE_POINT(x, y)                   \
+  data[batch_id * sprites_batch_stride +         \
+       sprite_id * sprites_sprite_stride +       \
+       y * sprites_row_stride +                  \
+       x * (n_channels + 1) + chan]
+
+#define GET_ALPHA_POINT(x, y)                    \
+  data[batch_id * sprites_batch_stride +         \
+       sprite_id * sprites_sprite_stride +       \
+       y * sprites_row_stride +                  \
+       x * (n_channels + 1) + n_channels]
+
 
 template <typename T>
-__global__ void Resampler2DKernel(const T* __restrict__ data,
-                                  const T* __restrict__ warp,
-                                  T* __restrict__ output,
-                                  const int batch_size,
-                                  const int data_height,
-                                  const int data_width,
-                                  const int data_channels,
-                                  const int num_sampling_points) {
+__global__ void RenderSprites2DKernel(const T* __restrict__ sprites,
+                                      const int32* __restrict__ n_sprites,
+                                      const T* __restrict__ scales,
+                                      const T* __restrict__ offsets,
+                                      const T* __restrict__ backgrounds,
 
-  const int output_data_size = batch_size * num_sampling_points * data_channels;
-  CUDA_1D_KERNEL_LOOP(index, output_data_size) {
-    const int out_index = index;
+                                      T* __restrict__ output,
 
-    // Get (idxSample, channel, point) from the index.
-    // Use this formula
-    //   index = batch_id * num_sampling_points * num_chans +
-    //           sample_id * num_chans + chan_id,
-    // with sample_id = [0, ... ,num_sampling_points)
-    const int data_batch_stride = data_height * data_width * data_channels;
-    const int warp_batch_stride = num_sampling_points * 2;
-    const int output_batch_stride = num_sampling_points * data_channels;
+                                      const int batch_size,
 
-    const int batch_id = index / output_batch_stride;
-    const int index_in_batch = index % output_batch_stride;
-    const int chan = index_in_batch % data_channels;
-    const int sample_id = index_in_batch / data_channels;
+                                      const int max_sprites,
+                                      const int sprite_height,
+                                      const int sprite_width,
 
-    // Get coords of 2D point where data will be resampled
-    const T x = warp[batch_id * warp_batch_stride + sample_id * 2];
-    const T y = warp[batch_id * warp_batch_stride + sample_id * 2 + 1];
+                                      const int img_height,
+                                      const int img_width,
+
+                                      const int n_channels){
+
+  const int output_size = batch_size * img_height * img_width * n_channels;
+
+  CUDA_1D_KERNEL_LOOP(index, output_size) {
+    const int sprite_batch_stride = max_sprites * sprite_height * sprite_width * (n_channels + 1);
+    const int sprite_sprite_stride = sprite_height * sprite_width * (n_channels + 1);
+    const int sprite_row_stride = sprite_width * (n_channels + 1);
+
+    const int scales_batch_stride = 2 * max_sprites;
+    const int offsets_batch_stride = 2 * max_sprites;
+
+    const int img_batch_stride = img_height * img_width * n_channels;
+    const int img_row_stride = img_width * n_channels;
+
+    const T sprite_height_T = static_cast<T>(sprite_height);
+    const T sprite_width_T = static_cast<T>(sprite_width);
+
+    const T img_height_T = static_cast<T>(img_height);
+    const T img_width_T = static_cast<T>(img_width);
+
     const T zero = static_cast<T>(0.0);
     const T one = static_cast<T>(1.0);
 
-    // The interpolation function:
-    // a) implicitly pads the input data with 0s (hence the unusual checks
-    // with {x,y} > -1)
-    // b) returns 0 when sampling outside the (padded) image.
-    // The effect is that the sampled signal smoothly goes to 0 outside
-    // the original input domain, rather than presenting a jump
-    // discontinuity at the image boundaries.
-    if (x > static_cast<T>(-1.0) &&
-        y > static_cast<T>(-1.0) &&
-        x < static_cast<T>(data_width) &&
-        y < static_cast<T>(data_height)) {
+    const int batch_id = index / img_batch_stride;
+    const int index_in_batch = index % img_batch_stride;
+    const int img_y = index_in_batch / img_row_stride;
+    const int index_in_row = index_in_batch % image_row_stride;
+    const int img_x = index_in_row / n_channels;
+    const int chan = index_in_row % n_channels;
 
-      // Precompute floor (f) and ceil (c) values for x and y.
-      const int fx = std::floor(static_cast<float>(x));
-      const int fy = std::floor(static_cast<float>(y));
-      const int cx = fx + 1;
-      const int cy = fy + 1;
-      const T dx = static_cast<T>(cx) - x;
-      const T dy = static_cast<T>(cy) - y;
+    const T img_y_T = static_cast<T>(img_y_T);
+    const T img_x_T = static_cast<T>(img_x_T);
 
-      const T img_fxfy = (fx >= 0 && fy >= 0)
-                         ? dx * dy * GET_DATA_POINT(fx, fy)
-                         : zero;
+    for (int sprite_id = 0; sprite_id < n_sprites[batch_id]; ++sprite_id) {
+      const T scale_y = scales[batch_id * scales_batch_stride + sprite_id * 2];
+      const T scale_x = scales[batch_id * scales_batch_stride + sprite_id * 2 + 1];
 
-      const T img_cxcy = (cx <= data_width - 1 && cy <= data_height - 1)
-                         ? (one - dx) * (one - dy) * GET_DATA_POINT(cx, cy)
-                         : zero;
+      const T offset_y = offsets[batch_id * offsets_batch_stride + sprite_id * 2];
+      const T offset_x = offsets[batch_id * offsets_batch_stride + sprite_id * 2 + 1];
 
-      const T img_fxcy = (fx >= 0 && cy <= data_height - 1)
-                         ? dx * (one - dy) * GET_DATA_POINT(fx, cy)
-                         : zero;
+      // The pixel location represented in the sprites's co-ordinate frame
+      const T y = -0.5 + sprite_height_T * ((img_y_T + 0.5) / img_height_T - offset_y) / scale_y;
+      const T x = -0.5 + sprite_width_T * ((img_x_T + 0.5) / img_width_T - offset_x) / scale_x;
 
-      const T img_cxfy = (cx <= data_width - 1 && fy >= 0)
-                         ? (one - dx) * dy * GET_DATA_POINT(cx, fy)
-                         : zero;
+      const bool within_bounds = x > static_cast<T>(-1.0) &&
+                                 y > static_cast<T>(-1.0) &&
+                                 x < sprite_width_T &&
+                                 y < sprite_height_T;
+      if (within_bounds){
+        const int fx = std::floor(static_cast<float>(x));
+        const int fy = std::floor(static_cast<float>(y));
 
-      output[out_index] = img_fxfy + img_cxcy + img_fxcy + img_cxfy;
-    } else {
-      output[out_index] = zero;
-    }
+        const int cx = fx + 1;
+        const int cy = fy + 1;
+
+        const T dx = static_cast<T>(cx) - x;
+        const T dy = static_cast<T>(cy) - y;
+
+        const T alpha_fxfy = (fx >= 0 && fy >= 0)
+                           ? GET_ALPHA_POINT(fx, fy)
+                           : zero;
+
+        const T alpha_cxcy = (cx <= sprite_width - 1 && cy <= sprite_height - 1)
+                           ? GET_ALPHA_POINT(cx, cy)
+                           : zero;
+
+        const T alpha_fxcy = (fx >= 0 && cy <= sprite_height - 1)
+                           ? GET_ALPHA_POINT(fx, cy)
+                           : zero;
+
+        const T alpha_cxfy = (cx <= sprite_width - 1 && fy >= 0)
+                           ? GET_ALPHA_POINT(cx, fy)
+                           : zero;
+
+        const T alpha = dx * dy * alpha_fxfy +
+                        (one - dx) * (one - dy) * alpha_cxcy +
+                        dx * (one - dy) * alpha_fxcy +
+                        (one - dx) * dy * alpha_cxfy;
+
+        const T img_fxfy = (fx >= 0 && fy >= 0)
+                           ? GET_SPRITE_POINT(fx, fy)
+                           : zero;
+
+        const T img_cxcy = (cx <= sprite_width - 1 && cy <= sprite_height - 1)
+                           ? GET_SPRITE_POINT(cx, cy)
+                           : zero;
+
+        const T img_fxcy = (fx >= 0 && cy <= sprite_height - 1)
+                           ? GET_SPRITE_POINT(fx, cy)
+                           : zero;
+
+        const T img_cxfy = (cx <= sprite_width - 1 && fy >= 0)
+                           ? GET_SPRITE_POINT(cx, fy)
+                           : zero;
+
+        const T interp = dx * dy * img_fxfy +
+                         (one - dx) * (one - dy) * img_cxcy +
+                         dx * (one - dy) * img_fxcy +
+                         (one - dx) * dy * img_cxfy;
+
+        const T current = output[index];
+        output[index] = alpha * interp + (1 - alpha) * current;
+      }
+    } // sprite_id
   }
 }
 
@@ -118,196 +175,453 @@ __global__ void Resampler2DKernel(const T* __restrict__ data,
 namespace functor {
 
 template <typename T>
-struct Resampler2DFunctor<GPUDevice, T>{
+struct RenderSprites2DFunctor<GPUDevice, T>{
   void operator ()(::tensorflow::OpKernelContext* ctx,
                    const GPUDevice& d,
-                   const T* __restrict__ data,
-                   const T* __restrict__ warp,
+
+                   const T* __restrict__ sprites,
+                   const int32* __restrict__ n_sprites,
+                   const T* __restrict__ scales,
+                   const T* __restrict__ offsets,
+                   const T* __restrict__ backgrounds,
+
                    T* __restrict__ output,
+
                    const int batch_size,
-                   const int data_height,
-                   const int data_width,
-                   const int data_channels,
-                   const int num_sampling_points) {
 
-  const int output_data_size = batch_size * num_sampling_points * data_channels;
+                   const int max_sprites,
+                   const int sprite_height,
+                   const int sprite_width,
 
-  ::tensorflow::CudaLaunchConfig config = ::tensorflow::GetCudaLaunchConfig(output_data_size, d);
+                   const int img_height,
+                   const int img_width,
 
-  Resampler2DKernel<T>
-      <<<config.block_count, config.thread_per_block, 0, d.stream()>>>(
-          data, warp, output, batch_size, data_height, data_width,
-          data_channels, num_sampling_points);
+                   const int n_channels){
+
+    const int output_size = batch_size * img_height * img_width * n_channels;
+
+    ::tensorflow::CudaLaunchConfig config = ::tensorflow::GetCudaLaunchConfig(output_size, d);
+
+    RenderSprites2DKernel<T>
+        <<<config.block_count, config.thread_per_block, 0, d.stream()>>>(
+            sprites, n_sprites, scales, offsets, backgrounds,
+            batch_size, max_sprites, sprite_height, sprite_width,
+            img_height, img_width, n_channels);
   }
 };
 
 // TODO(fviola): gcudacc fails at compile time with Eigen::half.
-// template struct Resampler2DFunctor<GPUDevice, Eigen::half>;
-template struct Resampler2DFunctor<GPUDevice, float>;
-template struct Resampler2DFunctor<GPUDevice, double>;
+// template struct RenderSprites2DFunctor<GPUDevice, Eigen::half>;
+template struct RenderSprites2DFunctor<GPUDevice, float>;
+template struct RenderSprites2DFunctor<GPUDevice, double>;
 
 }  // namespace functor
 
+
+
+
 namespace {
 
-#define UPDATE_GRAD_DATA_POINT(x, y, v)                  \
-  atomicAdd(grad_data + (batch_id * data_batch_stride +  \
-            data_channels * (y * data_width + x) +       \
-            chan),                                       \
+#define UPDATE_GRAD_SPRITES(x, y, v) \
+  atomicAdd(grad_sprites + \
+            batch_id * sprites_batch_stride + \
+            sprite_id * sprites_sprite_stride + \
+            y * sprites_row_stride + \
+            x * (n_channels + 1) + \
+            chan, \
             v)
 
+#define UPDATE_GRAD_ALPHAS(x, y, v) \
+  atomicAdd(grad_sprites + \
+            batch_id * sprites_batch_stride + \
+            sprite_id * sprites_sprite_stride + \
+            y * sprites_row_stride + \
+            x * (n_channels + 1) + \
+            n_channels, \
+            v)
+
+#define UPDATE_GRAD_SCALES_Y(v) \
+  atomicAdd(grad_scales + \
+            batch_id * scales_batch_stride + \
+            sprite_id * 2, \
+            v)
+
+#define UPDATE_GRAD_SCALES_X(v) \
+  atomicAdd(grad_scales + \
+            batch_id * scales_batch_stride + \
+            sprite_id * 2 + 1, \
+            v)
+
+#define UPDATE_GRAD_OFFSETS_Y(v) \
+  atomicAdd(grad_offsets + \
+            batch_id * offsets_batch_stride + \
+            sprite_id * 2, \
+            v)
+
+#define UPDATE_GRAD_OFFSETS_X(v) \
+  atomicAdd(grad_offsets + \
+            batch_id * offsets_batch_stride + \
+            sprite_id * 2 + 1, \
+            v)
 
 template <typename T>
-__global__ void ResamplerGrad2DKernel(const T* __restrict__ data,
-                                      const T* __restrict__ warp,
-                                      const T* __restrict__ grad_output,
-                                      T* __restrict__ grad_data,
-                                      T* __restrict__ grad_warp,
-                                      const int batch_size,
-                                      const int data_height,
-                                      const int data_width,
-                                      const int data_channels,
-                                      const int num_sampling_points) {
+__global__ void RenderSpritesGrad2DKernel(const T* __restrict__ sprites,
+                                          const int32* __restrict__ n_sprites,
+                                          const T* __restrict__ scales,
+                                          const T* __restrict__ offsets,
+                                          const T* __restrict__ backgrounds,
 
-  const int render_sprites_output_size = batch_size * num_sampling_points * data_channels;
+                                          T* __restrict__ output,
 
-  CUDA_1D_KERNEL_LOOP(index, render_sprites_output_size) {
-    const int out_index = index;
+                                          const int batch_size,
 
-    // Get (idxSample, channel, point) from the index.
-    // Use this formula
-    //   index = batch_id * num_sampling_points * num_chans +
-    //           sample_id * num_chans + chan_id,
-    // with sample_id = [0, ... ,num_sampling_points)
-    const int data_batch_stride = data_height * data_width * data_channels;
-    const int warp_batch_stride = num_sampling_points * 2;
-    const int output_batch_stride = num_sampling_points * data_channels;
+                                          const int max_sprites,
+                                          const int sprite_height,
+                                          const int sprite_width,
 
-    const int batch_id = index / output_batch_stride;
-    const int index_in_batch = index % output_batch_stride;
-    const int chan = index_in_batch % data_channels;
-    const int sample_id = index_in_batch / data_channels;
+                                          const int img_height,
+                                          const int img_width,
 
-    // Get coords of 2D point where data will be resampled
-    const int warp_id_x = batch_id * warp_batch_stride + sample_id * 2;
-    const int warp_id_y = warp_id_x + 1;
-    const T x = warp[warp_id_x];
-    const T y = warp[warp_id_y];
+                                          const int n_channels){
+
+  extern __shared__ T shared_scratch;
+  const T* scratch = &shared_scratch[(max_sprites+1) * threadIdx.x];
+
+  const int output_size = batch_size * img_height * img_width * n_channels;
+
+  CUDA_1D_KERNEL_LOOP(index, output_size) {
+    const int sprite_batch_stride = max_sprites * sprite_height * sprite_width * (n_channels + 1);
+    const int sprite_sprite_stride = sprite_height * sprite_width * (n_channels + 1);
+    const int sprite_row_stride = sprite_width * (n_channels + 1);
+
+    const int scales_batch_stride = 2 * max_sprites;
+    const int offsets_batch_stride = 2 * max_sprites;
+
+    const int img_batch_stride = img_height * img_width * n_channels;
+    const int img_row_stride = img_width * n_channels;
+
+    const T sprite_height_T = static_cast<T>(sprite_height);
+    const T sprite_width_T = static_cast<T>(sprite_width);
+
+    const T img_height_T = static_cast<T>(img_height);
+    const T img_width_T = static_cast<T>(img_width);
+
     const T zero = static_cast<T>(0.0);
     const T one = static_cast<T>(1.0);
 
-    // Get grad output
-    const T grad_output_value = grad_output[out_index];
-    // The interpolation function whose gradient this kernel implements:
-    // a) implicitly pads the input data with 0s (hence the unusual checks
-    // with {x,y} > -1)
-    // b) returns 0 when sampling outside the (padded) image.
-    // The effect is that the sampled signal smoothly goes to 0 outside
-    // the original input domain, rather than presenting a jump
-    // discontinuity at the image boundaries.
-    if (x > static_cast<T>(-1.0) &&
-        y > static_cast<T>(-1.0) &&
-        x < static_cast<T>(data_width) &&
-        y < static_cast<T>(data_height)) {
-      // Precompute floor (f) and ceil (c) values for x and y.
-      const int fx = std::floor(static_cast<float>(x));
-      const int fy = std::floor(static_cast<float>(y));
-      const int cx = fx + 1;
-      const int cy = fy + 1;
-      const T dx = static_cast<T>(cx) - x;
-      const T dy = static_cast<T>(cy) - y;
+    const int batch_id = index / img_batch_stride;
+    const int index_in_batch = index % img_batch_stride;
+    const int img_y = index_in_batch / img_row_stride;
+    const int index_in_row = index_in_batch % image_row_stride;
+    const int img_x = index_in_row / n_channels;
+    const int chan = index_in_row % n_channels;
 
-      const T img_fxfy = (fx >= 0 && fy >= 0)
-                         ? GET_DATA_POINT(fx, fy)
-                         : zero;
+    const T img_y_T = static_cast<T>(img_y_T);
+    const T img_x_T = static_cast<T>(img_x_T);
 
-      const T img_cxcy = (cx <= data_width - 1 && cy <= data_height - 1)
-                         ? GET_DATA_POINT(cx, cy)
-                         : zero;
+    scratch[0] = backgrounds[batch_id * img_batch_stride +
+                             img_y * img_row_stride +
+                             img_x * n_channels + chan];
 
-      const T img_fxcy = (fx >= 0 && cy <= data_height - 1)
-                         ? GET_DATA_POINT(fx, cy)
-                         : zero;
+    for (int sprite_id = 0; sprite_id < n_sprites[batch_id]; ++sprite_id) {
+      const T scale_y = scales[batch_id * scales_batch_stride + sprite_id * 2];
+      const T scale_x = scales[batch_id * scales_batch_stride + sprite_id * 2 + 1];
 
-      const T img_cxfy = (cx <= data_width - 1 && fy >= 0)
-                         ? GET_DATA_POINT(cx, fy)
-                         : zero;
+      const T offset_y = offsets[batch_id * offsets_batch_stride + sprite_id * 2];
+      const T offset_x = offsets[batch_id * offsets_batch_stride + sprite_id * 2 + 1];
 
-      // Update partial gradients wrt relevant warp field entries
-      atomicAdd(grad_warp + warp_id_x,
-                grad_output_value * ((one - dy) * (img_cxcy - img_fxcy) +
-                                     dy * (img_cxfy - img_fxfy)));
-      atomicAdd(grad_warp + warp_id_y,
-                grad_output_value * ((one - dx) * (img_cxcy - img_cxfy) +
-                                     dx * (img_fxcy - img_fxfy)));
+      // The pixel location represented in the sprites's co-ordinate frame
+      const T y = -0.5 + sprite_height_T * ((img_y_T + 0.5) / img_height_T - offset_y) / scale_y;
+      const T x = -0.5 + sprite_width_T * ((img_x_T + 0.5) / img_width_T - offset_x) / scale_x;
 
-      // Update partial gradients wrt sampled data
-      if (fx >= 0 && fy >= 0) {
-        UPDATE_GRAD_DATA_POINT(fx, fy, grad_output_value * dx * dy);
+      const bool within_bounds = x > static_cast<T>(-1.0) &&
+                                 y > static_cast<T>(-1.0) &&
+                                 x < sprite_width_T &&
+                                 y < sprite_height_T;
+      if (within_bounds){
+        const int fx = std::floor(static_cast<float>(x));
+        const int fy = std::floor(static_cast<float>(y));
+
+        const int cx = fx + 1;
+        const int cy = fy + 1;
+
+        const T dx = static_cast<T>(cx) - x;
+        const T dy = static_cast<T>(cy) - y;
+
+        const T alpha_fxfy = (fx >= 0 && fy >= 0)
+                           ? GET_ALPHA_POINT(fx, fy)
+                           : zero;
+
+        const T alpha_cxcy = (cx <= sprite_width - 1 && cy <= sprite_height - 1)
+                           ? GET_ALPHA_POINT(cx, cy)
+                           : zero;
+
+        const T alpha_fxcy = (fx >= 0 && cy <= sprite_height - 1)
+                           ? GET_ALPHA_POINT(fx, cy)
+                           : zero;
+
+        const T alpha_cxfy = (cx <= sprite_width - 1 && fy >= 0)
+                           ? GET_ALPHA_POINT(cx, fy)
+                           : zero;
+
+        const T alpha = dx * dy * alpha_fxfy +
+                        (one - dx) * (one - dy) * alpha_cxcy +
+                        dx * (one - dy) * alpha_fxcy +
+                        (one - dx) * dy * alpha_cxfy;
+
+        const T img_fxfy = (fx >= 0 && fy >= 0)
+                           ? GET_SPRITE_POINT(fx, fy)
+                           : zero;
+
+        const T img_cxcy = (cx <= sprite_width - 1 && cy <= sprite_height - 1)
+                           ? GET_SPRITE_POINT(cx, cy)
+                           : zero;
+
+        const T img_fxcy = (fx >= 0 && cy <= sprite_height - 1)
+                           ? GET_SPRITE_POINT(fx, cy)
+                           : zero;
+
+        const T img_cxfy = (cx <= sprite_width - 1 && fy >= 0)
+                           ? GET_SPRITE_POINT(cx, fy)
+                           : zero;
+
+        const T interp = dx * dy * img_fxfy +
+                         (one - dx) * (one - dy) * img_cxcy +
+                         dx * (one - dy) * img_fxcy +
+                         (one - dx) * dy * img_cxfy;
+
+        scratch[sprite_id + 1] = alpha * interp + (1 - alpha) * scratch[sprite_id];
       }
-      if (cx <= data_width - 1 && cy <= data_height - 1) {
-        UPDATE_GRAD_DATA_POINT(cx, cy,
-                               grad_output_value  * (one - dx) * (one - dy));
+    } // sprite_id - forward pass
+
+    T premult = grad_output[batch_id * img_batch_stride
+                            img_y * img_row_stride
+                            img_x * n_channels + chan];
+
+    for (int sprite_id = n_sprites[batch_id]-1; sprite_id >= 0 ; --sprite_id) {
+      const T scale_y = scales[batch_id * scales_batch_stride + sprite_id * 2];
+      const T scale_x = scales[batch_id * scales_batch_stride + sprite_id * 2 + 1];
+
+      const T offset_y = offsets[batch_id * offsets_batch_stride + sprite_id * 2];
+      const T offset_x = offsets[batch_id * offsets_batch_stride + sprite_id * 2 + 1];
+
+      // The pixel location represented in the sprites's co-ordinate frame
+      const T y = -0.5 + sprite_height_T * ((img_y_T + 0.5) / img_height_T - offset_y) / scale_y;
+      const T x = -0.5 + sprite_width_T * ((img_x_T + 0.5) / img_width_T - offset_x) / scale_x;
+
+      const bool within_bounds = x > static_cast<T>(-1.0) &&
+                                 y > static_cast<T>(-1.0) &&
+                                 x < sprite_width_T &&
+                                 y < sprite_height_T;
+      if (within_bounds){
+        const int fx = std::floor(static_cast<float>(x));
+        const int fy = std::floor(static_cast<float>(y));
+
+        const int cx = fx + 1;
+        const int cy = fy + 1;
+
+        const T dx = static_cast<T>(cx) - x;
+        const T dy = static_cast<T>(cy) - y;
+
+        const T grad_y_wrt_scale_y = -sprite_height_T * ((img_y_T + 0.5) / img_height_T - offset_y) / (scale_y * scale_y);
+        const T grad_x_wrt_scale_x = -sprite_width_T * ((img_x_T + 0.5) / img_width_T - offset_x) / (scale_x * scale_x);
+
+        const T grad_y_wrt_offset_y = -sprite_height_T / scale_y;
+        const T grad_x_wrt_offset_x = -sprite_width_T / scale_x;
+
+        // ------ update gradient through alpha ------
+
+        const T alpha_fxfy = (fx >= 0 && fy >= 0)
+                           ? GET_ALPHA_POINT(fx, fy)
+                           : zero;
+
+        const T alpha_cxcy = (cx <= sprite_width - 1 && cy <= sprite_height - 1)
+                           ? GET_ALPHA_POINT(cx, cy)
+                           : zero;
+
+        const T alpha_fxcy = (fx >= 0 && cy <= sprite_height - 1)
+                           ? GET_ALPHA_POINT(fx, cy)
+                           : zero;
+
+        const T alpha_cxfy = (cx <= sprite_width - 1 && fy >= 0)
+                           ? GET_ALPHA_POINT(cx, fy)
+                           : zero;
+
+        const T alpha = dx * dy * alpha_fxfy +
+                        (one - dx) * (one - dy) * alpha_cxcy +
+                        dx * (one - dy) * alpha_fxcy +
+                        (one - dx) * dy * alpha_cxfy;
+
+        const T alpha_y_factor = dx * (alpha_fxcy - alpha_fxfy) + (1 - dx) * (alpha_cxcy - alpha_cxfy);
+        const T alpha_x_factor = dy * (alpha_fycx - alpha_fyfx) + (1 - dy) * (alpha_cycx - alpha_cyfx);
+
+        const T fg = scratch[(sprite_id + 1) * n_channels + chan];
+        const T bg = scratch[sprite_id * n_channels + chan];
+
+        const T alpha_premult = premult * (fg - bg);
+
+        UPDATE_GRAD_SCALES_Y(alpha_premult * alpha_y_factor * grad_y_wrt_scale_y);
+        UPDATE_GRAD_SCALES_X(alpha_premult * alpha_x_factor * grad_x_wrt_scale_x);
+        UPDATE_GRAD_OFFSETS_Y(alpha_premult * alpha_y_factor * grad_y_wrt_offset_y);
+        UPDATE_GRAD_OFFSETS_X(alpha_premult * alpha_x_factor * grad_x_wrt_offset_x);
+
+        if (fx >= 0 && fy >= 0) {
+          UPDATE_GRAD_ALPHAS(fx, fy, alpha_premult * dx * dy);
+        }
+        if (cx <= sprite_width - 1 && cy <= sprite_height - 1) {
+          UPDATE_GRAD_ALPHAS(cx, cy, alpha_premult * (1-dx) * (1-dy));
+        }
+        if (fx >= 0 && cy <= sprite_height - 1) {
+          UPDATE_GRAD_ALPHAS(fx, cy, alpha_premult * dx * (1-dy));
+        }
+        if (cx <= sprite_width - 1 && fy >= 0) {
+          UPDATE_GRAD_ALPHAS(cx, fy, alpha_premult * (1-dx) * dy);
+        }
+
+        // ------ update gradient through sprites ------
+
+        const T img_fxfy = (fx >= 0 && fy >= 0)
+                           ? GET_SPRITE_POINT(fx, fy)
+                           : zero;
+
+        const T img_cxcy = (cx <= sprite_width - 1 && cy <= sprite_height - 1)
+                           ? GET_SPRITE_POINT(cx, cy)
+                           : zero;
+
+        const T img_fxcy = (fx >= 0 && cy <= sprite_height - 1)
+                           ? GET_SPRITE_POINT(fx, cy)
+                           : zero;
+
+        const T img_cxfy = (cx <= sprite_width - 1 && fy >= 0)
+                           ? GET_SPRITE_POINT(cx, fy)
+                           : zero;
+
+        const T interp = dx * dy * img_fxfy +
+                         (one - dx) * (one - dy) * img_cxcy +
+                         dx * (one - dy) * img_fxcy +
+                         (one - dx) * dy * img_cxfy;
+
+        const T sprite_premult = premult * alpha;
+
+        const T sprite_y_factor = dx * (img_fxcy - img_fxfy) + (1 - dx) * (img_cxcy - img_cxfy);
+        const T sprite_x_factor = dy * (img_fycx - img_fyfx) + (1 - dy) * (img_cycx - img_cyfx);
+
+        UPDATE_GRAD_SCALES_Y(sprite_premult * sprite_y_factor * grad_y_wrt_scale_y);
+        UPDATE_GRAD_SCALES_X(sprite_premult * sprite_x_factor * grad_x_wrt_scale_x);
+        UPDATE_GRAD_OFFSETS_Y(sprite_premult * sprite_y_factor * grad_y_wrt_offset_y);
+        UPDATE_GRAD_OFFSETS_X(sprite_premult * sprite_x_factor * grad_x_wrt_offset_x);
+
+        if (fx >= 0 && fy >= 0) {
+          UPDATE_GRAD_SPRITES(fx, fy, sprite_premult * dx * dy);
+        }
+        if (cx <= sprite_width - 1 && cy <= sprite_height - 1) {
+          UPDATE_GRAD_SPRITES(cx, cy, sprite_premult * (1-dx) * (1-dy));
+        }
+        if (fx >= 0 && cy <= sprite_height - 1) {
+          UPDATE_GRAD_SPRITES(fx, cy, sprite_premult * dx * (1-dy));
+        }
+        if (cx <= sprite_width - 1 && fy >= 0) {
+          UPDATE_GRAD_SPRITES(cx, fy, sprite_premult * (1-dx) * dy);
+        }
+
+        premult *= (1 - alpha);
       }
-      if (fx >= 0 && cy <= data_height - 1) {
-        UPDATE_GRAD_DATA_POINT(fx, cy, grad_output_value * dx * (one - dy));
-      }
-      if (cx <= data_width - 1 && fy >= 0) {
-        UPDATE_GRAD_DATA_POINT(cx, fy, grad_output_value * (one - dx) * dy);
-      }
-    }
+    } // sprite_id - backward pass
+
+    bg = backgrounds[batch_id * img_batch_stride
+                     img_y * img_row_stride
+                     img_x * n_channels + chan];
+    grad_backgrounds[batch_id * img_batch_stride
+                     img_y * img_row_stride
+                     img_x * n_channels + chan] = premult * bg;
   }
 }
 
-#undef GET_DATA_POINT
-#undef UPDATE_GRAD_DATA_POINT
+#undef GET_ALPHA_POINT
+#undef GET_SPRITE_POINT
+#undef UPDATE_GRAD_SPRITES
+#undef UPDATE_GRAD_ALPHAS
+#undef UPDATE_GRAD_SCALES_Y
+#undef UPDATE_GRAD_SCALES_X
+#undef UPDATE_GRAD_OFFSETS_Y
+#undef UPDATE_GRAD_OFFSETS_X
 
 }  // namespace
 
 namespace functor {
 
 template <typename T>
-struct ResamplerGrad2DFunctor<GPUDevice, T>{
+struct RenderSpritesGrad2DFunctor<GPUDevice, T>{
+
   void operator ()(::tensorflow::OpKernelContext* ctx,
                    const GPUDevice& d,
-                   const T* __restrict__ data,
-                   const T* __restrict__ warp,
+
+                   const T* __restrict__ sprites,
+                   const int32* __restrict__ n_sprites,
+                   const T* __restrict__ scales,
+                   const T* __restrict__ offsets,
+                   const T* __restrict__ backgrounds,
                    const T* __restrict__ grad_output,
-                   T* __restrict__ grad_data,
-                   T* __restrict__ grad_warp,
+
+                   T* __restrict__ scratch,
+
+                   T* __restrict__ grad_sprites,
+                   T* __restrict__ grad_n_sprites,
+                   T* __restrict__ grad_scales,
+                   T* __restrict__ grad_offsets,
+                   T* __restrict__ grad_backgrounds,
+
                    const int batch_size,
-                   const int data_height,
-                   const int data_width,
-                   const int data_channels,
-                   const int num_sampling_points) {
-  // Set gradients to 0, because the kernel incrementally updates the
-  // tensor entries by adding partial contributions.
-  const int grad_warp_size = batch_size * num_sampling_points * 2;
-  const int grad_data_size = batch_size * data_height * data_width * data_channels;
 
-  ::tensorflow::CudaLaunchConfig config = ::tensorflow::GetCudaLaunchConfig(grad_warp_size, d);
+                   const int max_sprites,
+                   const int sprite_height,
+                   const int sprite_width,
 
-  ::tensorflow::SetZero
-      <<<config.block_count, config.thread_per_block, 0, d.stream()>>>(grad_warp_size, grad_warp);
+                   const int img_height,
+                   const int img_width,
 
-  config = ::tensorflow::GetCudaLaunchConfig(grad_data_size, d);
+                   const int n_channels){
 
-  ::tensorflow::SetZero
-      <<<config.block_count, config.thread_per_block, 0, d.stream()>>>(
-          grad_data_size, grad_data);
+    const int output_size = batch_size * img_height * img_width * n_channels;
 
-  const int render_sprites_output_size = batch_size * num_sampling_points * data_channels;
+    ::tensorflow::CudaLaunchConfig config = ::tensorflow::GetCudaLaunchConfig(output_size, d);
 
-  config = ::tensorflow::GetCudaLaunchConfig(render_sprites_output_size, d);
+    // Set gradients to 0, because the kernel incrementally updates the
+    // tensor entries by adding partial contributions (except for grad_backgrounds, which is only set one).
+    const int grad_sprites_size = batch_size * max_sprites * sprite_height * sprite_width * (n_channels + 1);
+    const int grad_n_sprites_size = batch_size;
+    const int grad_scales_size = batch_size * max_sprites * 2;
+    const int grad_offsets_size = batch_size * max_sprites * 2;
+    const int grad_backgrounds_size = batch_size * img_height * img_width * n_channels;
 
-  ResamplerGrad2DKernel<T>
-      <<<config.block_count, config.thread_per_block, 0, d.stream()>>>(
-          data, warp, grad_output, grad_data, grad_warp, batch_size,
-          data_height, data_width, data_channels, num_sampling_points);
+    ::tensorflow::CudaLaunchConfig config = ::tensorflow::GetCudaLaunchConfig(grad_sprites_size, d);
+    ::tensorflow::SetZero
+        <<<config.block_count, config.thread_per_block, 0, d.stream()>>>(grad_sprites_size, grad_sprites);
+
+    ::tensorflow::CudaLaunchConfig config = ::tensorflow::GetCudaLaunchConfig(grad_n_sprites_size, d);
+    ::tensorflow::SetZero
+        <<<config.block_count, config.thread_per_block, 0, d.stream()>>>(grad_n_sprites_size, grad_n_sprites);
+
+    ::tensorflow::CudaLaunchConfig config = ::tensorflow::GetCudaLaunchConfig(grad_n_scales_size, d);
+    ::tensorflow::SetZero
+        <<<config.block_count, config.thread_per_block, 0, d.stream()>>>(grad_n_scales_size, grad_n_scales);
+
+    ::tensorflow::CudaLaunchConfig config = ::tensorflow::GetCudaLaunchConfig(grad_offsets_size, d);
+    ::tensorflow::SetZero
+        <<<config.block_count, config.thread_per_block, 0, d.stream()>>>(grad_offsets_size, grad_offsets);
+
+    const int shared_mem_bytes_per_block = 49152;  // 48 KB * 1024.
+    config = ::tensorflow::GetCudaLaunchConfig(grad_backgrounds_size, d, RenderSpritesGrad2DKernel<T>, shared_mem_bytes_per_block, 0);
+    RenderSpritesGrad2DKernel<T>
+        <<<config.block_count, config.thread_per_block, 0, d.stream()>>>(
+            sprites, n_sprites, scales, offsets, backgrounds, grad_output,
+            grad_sprites, grad_n_sprites, grad_scales, grad_offsets, grad_backgrounds,
+            batch_size, max_sprites, sprite_height, sprite_width,
+            img_height, img_width, n_channels);
   }
 };
 
-template struct ResamplerGrad2DFunctor<GPUDevice, float>;
+template struct RenderSpritesGrad2DFunctor<GPUDevice, float>;
 
 }  // namespace functor
 
