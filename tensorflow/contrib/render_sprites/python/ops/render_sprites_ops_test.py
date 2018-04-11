@@ -95,7 +95,7 @@ def _make_warp(batch_size, warp_height, warp_width, dtype):
   return warp.astype(dtype)
 
 
-class ResamplerTest(test.TestCase):
+class RenderSpritesTest(test.TestCase):
 
   def test_op_forward_pass_gpu_float32(self):
     self._test_op_forward_pass(True, dtypes.float32, 1e-4)

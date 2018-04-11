@@ -41,7 +41,7 @@ struct RenderSprites2DFunctor<CPUDevice, T>{
                    const CPUDevice& d,
 
                    const T* __restrict__ sprites,
-                   const int32* __restrict__ n_sprites,
+                   const int* __restrict__ n_sprites,
                    const T* __restrict__ scales,
                    const T* __restrict__ offsets,
                    const T* __restrict__ backgrounds,
@@ -58,8 +58,6 @@ struct RenderSprites2DFunctor<CPUDevice, T>{
                    const int img_width,
 
                    const int n_channels){
-
-    memcpy(output, backgrounds, sizeof(T) * batch_size * img_height * img_width * n_channels);
 
     const int sprites_batch_stride = max_sprites * sprite_height * sprite_width * (n_channels + 1);
     const int sprites_sprite_stride = sprite_height * sprite_width * (n_channels + 1);
@@ -102,16 +100,22 @@ struct RenderSprites2DFunctor<CPUDevice, T>{
                : zero;
       };
 
-      for (int batch_id = start; batch_id < limit; ++batch_id) {
+      std::vector<T> pixel_value(n_channels, zero);
 
+      for (int batch_id = start; batch_id < limit; ++batch_id) {
         for (int img_y = 0; img_y < img_height; ++img_y) {
           const T img_y_T = static_cast<T>(img_y);
 
           for (int img_x = 0; img_x < img_width; ++img_x) {
             const T img_x_T = static_cast<T>(img_x);
 
-            for (int sprite_id = 0; sprite_id < n_sprites[batch_id]; ++sprite_id) {
+            for(int chan = 0; chan < n_channels; ++chan){
+                pixel_value[chan] = backgrounds[batch_id * img_batch_stride +
+                                                img_y * img_row_stride +
+                                                img_x * n_channels + chan];
+            }
 
+            for (int sprite_id = 0; sprite_id < n_sprites[batch_id]; ++sprite_id) {
               const T scale_y = scales[batch_id * scales_batch_stride + sprite_id * 2];
               const T scale_x = scales[batch_id * scales_batch_stride + sprite_id * 2 + 1];
 
@@ -168,14 +172,16 @@ struct RenderSprites2DFunctor<CPUDevice, T>{
                                  dx * (one - dy) * img_fxcy +
                                  (one - dx) * dy * img_cxfy;
 
-                const int output_idx = batch_id * img_batch_stride +
-                                       img_y * img_row_stride +
-                                       img_x * n_channels + chan;
-
-                const T current = output[output_idx];
-                output[output_idx] = alpha * interp + (1 - alpha) * current;
+                pixel_value[chan] = alpha * interp + (1 - alpha) * pixel_value[chan];
               } // channel
             } // sprite_id
+
+            for(int chan = 0; chan < n_channels; ++chan) {
+                output[batch_id * img_batch_stride +
+                       img_y * img_row_stride +
+                       img_x * n_channels + chan] = pixel_value[chan];
+            }
+
           } // img_x
         } // img_y
       } // batch_id
@@ -220,11 +226,14 @@ class RenderSpritesOp : public ::tensorflow::OpKernel {
     const ::tensorflow::TensorShape& backgrounds_shape = backgrounds.shape();
 
     const int batch_size = sprites_shape.dim_size(0);
-    const int max_sprites = sprites_shape.dim_size(1)
-    const int sprites_height = sprites_shape.dim_size(2);
-    const int sprites_width = sprites_shape.dim_size(3);
-    const int sprites_channels = sprites_shape.dim_size(4);
-    const int background_channels = backgrounds_shape.dim_size(3);
+    const int max_sprites = sprites_shape.dim_size(1);
+    const int sprite_height = sprites_shape.dim_size(2);
+    const int sprite_width = sprites_shape.dim_size(3);
+    const int sprite_channels = sprites_shape.dim_size(4);
+
+    const int img_height = backgrounds_shape.dim_size(1);
+    const int img_width = backgrounds_shape.dim_size(2);
+    const int n_channels = backgrounds_shape.dim_size(3);
 
     // ------ check batch size ------
 
@@ -269,7 +278,7 @@ class RenderSpritesOp : public ::tensorflow::OpKernel {
     // ------ trailing dims ------
 
     // because sprites have an alpha channel
-    OP_REQUIRES(ctx, sprites_channels == background_channels + 1,
+    OP_REQUIRES(ctx, sprite_channels == n_channels + 1,
                 ::tensorflow::errors::InvalidArgument(
                     "Channel dimension for sprites must be one larger than channel "
                     "dimension for backgrounds, but input shapes are: ", sprites_shape.DebugString(),
@@ -285,7 +294,7 @@ class RenderSpritesOp : public ::tensorflow::OpKernel {
                     "Trailing dimension of offsets must be 2, "
                     "but input shape is: ", offsets_shape.DebugString()));
 
-    ::tensorflow::TensorShape output_shape = background.shape();
+    ::tensorflow::TensorShape output_shape = backgrounds.shape();
     ::tensorflow::Tensor* output = nullptr;
     OP_REQUIRES_OK(ctx, ctx->allocate_output(0, output_shape, &output));
 
@@ -294,7 +303,7 @@ class RenderSpritesOp : public ::tensorflow::OpKernel {
                                                  ctx->eigen_device<Device>(),
 
                                                  sprites.flat<T>().data(),
-                                                 n_sprites.flat<int32>().data(),
+                                                 n_sprites.flat<int>().data(),
                                                  scales.flat<T>().data(),
                                                  offsets.flat<T>().data(),
                                                  backgrounds.flat<T>().data(),
@@ -326,9 +335,9 @@ class RenderSpritesOp : public ::tensorflow::OpKernel {
           .TypeConstraint<TYPE>("T"),        \
       RenderSpritesOp<CPUDevice, TYPE>);
 
-TF_CALL_half(REGISTER);
+// TF_CALL_half(REGISTER);
+// TF_CALL_double(REGISTER);
 TF_CALL_float(REGISTER);
-TF_CALL_double(REGISTER);
 #undef REGISTER
 
 #if GOOGLE_CUDA
@@ -337,8 +346,8 @@ TF_CALL_double(REGISTER);
                               .Device(DEVICE_GPU)  \
                               .TypeConstraint<TYPE>("T"),        \
                           RenderSpritesOp<GPUDevice, TYPE>)
+// TF_CALL_double(REGISTER);
 TF_CALL_float(REGISTER);
-TF_CALL_double(REGISTER);
 #undef REGISTER
 #endif  // GOOGLE_CUDA
 
@@ -351,7 +360,7 @@ struct RenderSpritesGrad2DFunctor<CPUDevice, T>{
                    const CPUDevice& d,
 
                    const T* __restrict__ sprites,
-                   const int32* __restrict__ n_sprites,
+                   const int* __restrict__ n_sprites,
                    const T* __restrict__ scales,
                    const T* __restrict__ offsets,
                    const T* __restrict__ backgrounds,
@@ -384,24 +393,24 @@ struct RenderSpritesGrad2DFunctor<CPUDevice, T>{
     memset(grad_offsets, 0, sizeof(T) * batch_size * max_sprites * 2);
     memset(grad_backgrounds, 0, sizeof(T) * batch_size * img_height * img_width * n_channels);
 
-    const int sprites_batch_stride = max_sprites * sprite_height * sprite_width * (n_channels + 1);
-    const int sprites_sprite_stride = sprite_height * sprite_width * (n_channels + 1);
-    const int sprites_row_stride = sprite_width * (n_channels + 1);
+    int sprites_batch_stride = max_sprites * sprite_height * sprite_width * (n_channels + 1);
+    int sprites_sprite_stride = sprite_height * sprite_width * (n_channels + 1);
+    int sprites_row_stride = sprite_width * (n_channels + 1);
 
-    const int scales_batch_stride = 2 * max_sprites;
-    const int offsets_batch_stride = 2 * max_sprites;
+    int scales_batch_stride = 2 * max_sprites;
+    int offsets_batch_stride = 2 * max_sprites;
 
-    const int img_batch_stride = img_height * img_width * n_channels;
-    const int img_row_stride = img_width * n_channels;
+    int img_batch_stride = img_height * img_width * n_channels;
+    int img_row_stride = img_width * n_channels;
 
-    const T sprite_height_T = static_cast<T>(sprite_height);
-    const T sprite_width_T = static_cast<T>(sprite_width);
+    T sprite_height_T = static_cast<T>(sprite_height);
+    T sprite_width_T = static_cast<T>(sprite_width);
 
-    const T img_height_T = static_cast<T>(img_height);
-    const T img_width_T = static_cast<T>(img_width);
+    T img_height_T = static_cast<T>(img_height);
+    T img_width_T = static_cast<T>(img_width);
 
-    const T zero = static_cast<T>(0.0);
-    const T one = static_cast<T>(1.0);
+    T zero = static_cast<T>(0.0);
+    T one = static_cast<T>(1.0);
 
     auto update_grads_for_batches = [&](const int start, const int limit) {
 
@@ -589,7 +598,7 @@ struct RenderSpritesGrad2DFunctor<CPUDevice, T>{
                               (one - dx) * dy * alpha_cxfy;
 
               const T alpha_y_factor = dx * (alpha_fxcy - alpha_fxfy) + (1 - dx) * (alpha_cxcy - alpha_cxfy);
-              const T alpha_x_factor = dy * (alpha_fycx - alpha_fyfx) + (1 - dy) * (alpha_cycx - alpha_cyfx);
+              const T alpha_x_factor = dy * (alpha_cxfy - alpha_fxfy) + (1 - dy) * (alpha_cxcy - alpha_fxcy);
 
               const T grad_y_wrt_scale_y = -sprite_height_T * ((img_y_T + 0.5) / img_height_T - offset_y) / (scale_y * scale_y);
               const T grad_x_wrt_scale_x = -sprite_width_T * ((img_x_T + 0.5) / img_width_T - offset_x) / (scale_x * scale_x);
@@ -598,17 +607,25 @@ struct RenderSpritesGrad2DFunctor<CPUDevice, T>{
               const T grad_x_wrt_offset_x = -sprite_width_T / scale_x;
 
               for (int chan = 0; chan < n_channels; ++chan) {
-                const T go = grad_output[batch_id * img_batch_stride
-                                         img_y * img_row_stride
+                const T go = grad_output[batch_id * img_batch_stride +
+                                         img_y * img_row_stride +
                                          img_x * n_channels + chan];
                 const T premult = go * one_minus_alpha_prod;
 
+                const T img_fxfy = get_sprite_data(batch_id, sprite_id, fx, fy, chan);
+                const T img_cxcy = get_sprite_data(batch_id, sprite_id, cx, cy, chan);
+                const T img_fxcy = get_sprite_data(batch_id, sprite_id, fx, cy, chan);
+                const T img_cxfy = get_sprite_data(batch_id, sprite_id, cx, fy, chan);
+
+                const T interp = dx * dy * img_fxfy +
+                                 (one - dx) * (one - dy) * img_cxcy +
+                                 dx * (one - dy) * img_fxcy +
+                                 (one - dx) * dy * img_cxfy;
+
                 // ------ update gradient through alpha ------
 
-                const T fg = scratch[(sprite_id + 1) * n_channels + chan];
                 const T bg = scratch[sprite_id * n_channels + chan];
-
-                const T alpha_premult = premult * (fg - bg);
+                const T alpha_premult = premult * (interp - bg);
 
                 update_grad_scales_y(batch_id, sprite_id, alpha_premult * alpha_y_factor * grad_y_wrt_scale_y);
                 update_grad_scales_x(batch_id, sprite_id, alpha_premult * alpha_x_factor * grad_x_wrt_scale_x);
@@ -623,20 +640,10 @@ struct RenderSpritesGrad2DFunctor<CPUDevice, T>{
 
                 // ------ update gradient through sprites ------
 
-                const T img_fxfy = get_sprite_data(batch_id, sprite_id, fx, fy, chan);
-                const T img_cxcy = get_sprite_data(batch_id, sprite_id, cx, cy, chan);
-                const T img_fxcy = get_sprite_data(batch_id, sprite_id, fx, cy, chan);
-                const T img_cxfy = get_sprite_data(batch_id, sprite_id, cx, fy, chan);
-
-                const T interp = dx * dy * img_fxfy +
-                                 (one - dx) * (one - dy) * img_cxcy +
-                                 dx * (one - dy) * img_fxcy +
-                                 (one - dx) * dy * img_cxfy;
-
                 const T sprite_premult = premult * alpha;
 
                 const T y_factor = dx * (img_fxcy - img_fxfy) + (1 - dx) * (img_cxcy - img_cxfy);
-                const T x_factor = dy * (img_fycx - img_fyfx) + (1 - dy) * (img_cycx - img_cyfx);
+                const T x_factor = dy * (img_cxfy - img_fxfy) + (1 - dy) * (img_cxcy - img_fxcy);
 
                 update_grad_scales_y(batch_id, sprite_id, sprite_premult * y_factor * grad_y_wrt_scale_y);
                 update_grad_scales_x(batch_id, sprite_id, sprite_premult * x_factor * grad_x_wrt_scale_x);
@@ -654,15 +661,12 @@ struct RenderSpritesGrad2DFunctor<CPUDevice, T>{
             } // sprite_id - backward pass
 
             for (int chan = 0; chan < n_channels; ++chan) {
-              const T go = grad_output[batch_id * img_batch_stride
-                                       img_y * img_row_stride
+              const T go = grad_output[batch_id * img_batch_stride +
+                                       img_y * img_row_stride +
                                        img_x * n_channels + chan];
-              const T bg = backgrounds[batch_id * img_batch_stride
-                               img_y * img_row_stride
-                               img_x * n_channels + chan];
-              grad_backgrounds[batch_id * img_batch_stride
-                               img_y * img_row_stride
-                               img_x * n_channels + chan] = go * one_minus_alpha_prod * bg;
+              grad_backgrounds[batch_id * img_batch_stride +
+                               img_y * img_row_stride +
+                               img_x * n_channels + chan] = go * one_minus_alpha_prod;
             }
           } // img_x
         } // img_y
@@ -710,11 +714,14 @@ class RenderSpritesGradOp : public ::tensorflow::OpKernel {
     const ::tensorflow::TensorShape& backgrounds_shape = backgrounds.shape();
 
     const int batch_size = sprites_shape.dim_size(0);
-    const int max_sprites = sprites_shape.dim_size(1)
-    const int sprites_height = sprites_shape.dim_size(2);
-    const int sprites_width = sprites_shape.dim_size(3);
-    const int sprites_channels = sprites_shape.dim_size(4);
-    const int background_channels = backgrounds_shape.dim_size(3);
+    const int max_sprites = sprites_shape.dim_size(1);
+    const int sprite_height = sprites_shape.dim_size(2);
+    const int sprite_width = sprites_shape.dim_size(3);
+    const int sprite_channels = sprites_shape.dim_size(4);
+
+    const int img_height = backgrounds_shape.dim_size(1);
+    const int img_width = backgrounds_shape.dim_size(2);
+    const int n_channels = backgrounds_shape.dim_size(3);
 
     // ------ check batch size ------
 
@@ -759,7 +766,7 @@ class RenderSpritesGradOp : public ::tensorflow::OpKernel {
     // ------ trailing dims ------
 
     // because sprites have an alpha channel
-    OP_REQUIRES(ctx, sprites_channels == background_channels + 1,
+    OP_REQUIRES(ctx, sprite_channels == n_channels + 1,
                 ::tensorflow::errors::InvalidArgument(
                     "Trailing dimension of  scales must be 2, "
                     "but input shape is: ", scales_shape.DebugString()));
@@ -778,10 +785,10 @@ class RenderSpritesGradOp : public ::tensorflow::OpKernel {
 
     OP_REQUIRES(ctx, grad_output_shape == backgrounds_shape,
                 ::tensorflow::errors::InvalidArgument(
-                   "grad_output shape is not consistent with background "
+                   "grad_output shape is not consistent with backgrounds "
                    "shape; it should be ",
                    backgrounds_shape.DebugString(), " but is ",
-                   grad_output_shape.DebugString()))
+                   grad_output_shape.DebugString()));
 
     ::tensorflow::Tensor* grad_sprites = nullptr;
     ::tensorflow::Tensor* grad_n_sprites = nullptr;
@@ -796,20 +803,21 @@ class RenderSpritesGradOp : public ::tensorflow::OpKernel {
     OP_REQUIRES_OK(ctx, ctx->allocate_output(0, backgrounds.shape(), &grad_backgrounds));
 
     ::tensorflow::Tensor* scratch = nullptr;
-    ::tensorflow::TensorShape& scratch_shape = {background_channels * (max_sprites + 1)};
-    OP_REQUIRES_OK(ctx, ctx->allocate_temp(sprites.dtype(), scratch_shape, &scratch));
+    const ::tensorflow::TensorShape& scratch_shape{n_channels * (max_sprites + 1)};
+
+    OP_REQUIRES_OK(ctx, ctx->allocate_temp(sprites.dtype(), scratch_shape, scratch));
 
     functor::RenderSpritesGrad2DFunctor<Device, T>()(ctx,
                                                      ctx->eigen_device<Device>(),
 
                                                      sprites.flat<T>().data(),
-                                                     n_sprites.flat<int32>().data(),
+                                                     n_sprites.flat<int>().data(),
                                                      scales.flat<T>().data(),
                                                      offsets.flat<T>().data(),
                                                      backgrounds.flat<T>().data(),
                                                      grad_output.flat<T>().data(),
 
-                                                     scratch.flat<T>().data(),
+                                                     scratch->flat<T>().data(),
 
                                                      grad_sprites->flat<T>().data(),
                                                      grad_n_sprites->flat<T>().data(),
@@ -824,7 +832,6 @@ class RenderSpritesGradOp : public ::tensorflow::OpKernel {
 
                                                      img_height,
                                                      img_width,
-
                                                      n_channels);
   }
 
@@ -839,9 +846,9 @@ class RenderSpritesGradOp : public ::tensorflow::OpKernel {
           .TypeConstraint<TYPE>("T"),        \
       RenderSpritesGradOp<CPUDevice, TYPE>);
 
-TF_CALL_half(REGISTER);
+// TF_CALL_half(REGISTER);
+// TF_CALL_double(REGISTER);
 TF_CALL_float(REGISTER);
-TF_CALL_double(REGISTER);
 #undef REGISTER
 
 #if GOOGLE_CUDA

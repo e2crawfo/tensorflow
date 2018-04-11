@@ -13,8 +13,8 @@
 // limitations under the License.
 // =============================================================================
 
-#ifndef TENSORFLOW_CONTRIB_RESAMPLER_KERNELS_RESAMPLER_OPS_H_
-#define TENSORFLOW_CONTRIB_RESAMPLER_KERNELS_RESAMPLER_OPS_H_
+#ifndef TENSORFLOW_CONTRIB_RENDER_SPRITES_KERNELS_RENDER_SPRITES_OPS_H_
+#define TENSORFLOW_CONTRIB_RENDER_SPRITES_KERNELS_RENDER_SPRITES_OPS_H_
 
 #if PLATFORM_WINDOWS
 #define __restrict__ __restrict
@@ -29,12 +29,12 @@ namespace functor {
 
 
 template <typename Device, typename T>
-struct RenderSprites2DFunctor<Device, T>{
+struct RenderSprites2DFunctor {
   void operator ()(::tensorflow::OpKernelContext* ctx,
-                   const CPUDevice& d,
+                   const Device& d,
 
                    const T* __restrict__ sprites,
-                   const int32* __restrict__ n_sprites,
+                   const int* __restrict__ n_sprites,
                    const T* __restrict__ scales,
                    const T* __restrict__ offsets,
                    const T* __restrict__ backgrounds,
@@ -54,12 +54,12 @@ struct RenderSprites2DFunctor<Device, T>{
 };
 
 template <typename Device, typename T>
-struct RenderSpritesGrad2DFunctor<Device, T>{
+struct RenderSpritesGrad2DFunctor {
   void operator ()(::tensorflow::OpKernelContext* ctx,
-                   const CPUDevice& d,
+                   const Device& d,
 
                    const T* __restrict__ sprites,
-                   const int32* __restrict__ n_sprites,
+                   const int* __restrict__ n_sprites,
                    const T* __restrict__ scales,
                    const T* __restrict__ offsets,
                    const T* __restrict__ backgrounds,
@@ -89,4 +89,4 @@ struct RenderSpritesGrad2DFunctor<Device, T>{
 
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_CONTRIB_RESAMPLER_KERNELS_RESAMPLER_OPS_H_
+#endif  // TENSORFLOW_CONTRIB_RENDER_SPRITES_KERNELS_RENDER_SPRITES_OPS_H_

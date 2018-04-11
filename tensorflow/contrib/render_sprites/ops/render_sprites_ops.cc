@@ -30,7 +30,8 @@ REGISTER_OP("RenderSprites")
 
     .Output("output: T")
 
-    .Attr("T: {half, float, double}")
+    .Attr("T: {float}")
+    // .Attr("T: {half, float, double}")
 
     .SetShapeFn([](InferenceContext* c) {
       ShapeHandle sprites;
@@ -59,11 +60,13 @@ REGISTER_OP("RenderSpritesGrad")
     .Input("grad_output: T")
 
     .Output("grad_sprites: T")
+    .Output("grad_n_sprites: T")
     .Output("grad_scales: T")
     .Output("grad_offsets: T")
     .Output("grad_backgrounds: T")
 
-    .Attr("T: {half, float, double}")
+    .Attr("T: {float}")
+    // .Attr("T: {half, float, double}")
 
     .SetShapeFn([](InferenceContext* c) {
       ShapeHandle sprites;
@@ -71,6 +74,7 @@ REGISTER_OP("RenderSpritesGrad")
       ShapeHandle scales;
       ShapeHandle offsets;
       ShapeHandle backgrounds;
+      ShapeHandle grad_output;
 
       TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 5, &sprites));
       TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 1, &n_sprites));
@@ -80,12 +84,13 @@ REGISTER_OP("RenderSpritesGrad")
       TF_RETURN_IF_ERROR(c->WithRank(c->input(5), 5, &grad_output));
 
       c->set_output(0, sprites);
-      c->set_output(1, scales);
-      c->set_output(2, offsets);
-      c->set_output(3, backgrounds);
+      c->set_output(1, n_sprites);
+      c->set_output(2, scales);
+      c->set_output(3, offsets);
+      c->set_output(4, backgrounds);
 
       return ::tensorflow::Status::OK();
     })
-    .Doc(R"doc(Resampler Grad op.)doc");
+    .Doc(R"doc(RenderSprites Grad op.)doc");
 
 }  // namespace tensorflow
